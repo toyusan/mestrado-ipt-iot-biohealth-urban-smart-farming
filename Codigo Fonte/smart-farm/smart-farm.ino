@@ -16,6 +16,12 @@
 #define APP_VERSION "1.0.0"
 #define SEPARATOR_LINE "****************************************************"
 
+#define TIME_LOOP   5
+#define ONE_SECOND  1000
+#define ONE_MINUTE  60 * 1000
+#define ONE_HOUR    60 * ONE_MINUTE
+#define ONE_DAY     24 * ONE_HOUR
+
 // Thehse Defines which sensors are in use and when it needs to send data to the Thingsboard plataform
 #define USE_DHT
 #define USE_BH1750
@@ -28,19 +34,19 @@
 #include "WiFi.h"              // WiFi Library
 
 #ifdef USE_THINGSBOARD
-  #include "ThingsBoard.h"     // The Things Board Library
+#include "ThingsBoard.h"     // The Things Board Library
 #endif
 
 #ifdef USE_DHT
-  #include "DHT.h"             // Temperature and Humidity Library
+#include "DHT.h"             // Temperature and Humidity Library
 #endif
 
 #ifdef USE_BH1750
-  #include "BH1750.h"          // luminosity Library
+#include "BH1750.h"          // luminosity Library
 #endif
 
 #ifdef USE_CCS811
-  #include "Adafruit_CCS811.h" // CO2 Sensero Library
+#include "Adafruit_CCS811.h" // CO2 Sensero Library
 #endif
 
 #include "Wire.h"              // I2C Communication Library
@@ -55,44 +61,45 @@ WiFiClient espClient;
 
 /* ThingsBoard Configuration--------------------------------------------------*/
 #ifdef USE_THINGSBOARD
-  ThingsBoard thingsBoard(espClient);
-  #define THINGSBOARD_SERVER  "###"
-  #define TOKEN "###"
+ThingsBoard thingsBoard(espClient);
+#define THINGSBOARD_SERVER  "###"
+#define TOKEN               "###"
+#define TIME_THINGSBOARD    (ONE_MINUTE / ONE_SECOND) / TIME_LOOP  // Send data every One minute ->(60*1000/1000)/5 = 12 Loops de 5 segundos
+int countToSend = 0;
 #endif
 
 /* DHT Configuration----------------------------------------------------------*/
 #ifdef USE_DHT
-  DHT dht (13, DHT11); // The sensor is connect under the GPIO 13
-  float dhtTemperature = 0;
-  float dhtHumidity = 0;
+DHT dht (13, DHT11); // The sensor is connect under the GPIO 13
+float dhtTemperature = 0;
+float dhtHumidity = 0;
 #endif
 
 /* BH1750 Configuration------------------------------------------------------*/
 #ifdef USE_BH1750
-  BH1750  lightMeter;
-  float   bh1750LightMeterLux = 0;
-  int     lampStatus = 0;
-  #define LUX_MIN 30
- 
+BH1750  lightMeter;
+float   bh1750LightMeterLux = 0;
+int     lampStatus = 0;
+#define LUX_MIN 30
 #endif
 
 /* CCS811 Configuration------------------------------------------------------*/
 #ifdef USE_CCS811
-  Adafruit_CCS811 ccs811;
-  float ccs811temp = 0;
-  float ccs811CO2 = 0;
-  float ccs811Tvoc = 0;
+Adafruit_CCS811 ccs811;
+float ccs811temp = 0;
+float ccs811CO2 = 0;
+float ccs811Tvoc = 0;
 #endif
 
 /* Soil Humidity Configuration-----------------------------------------------*/
 #ifdef USE_SOIL_SENSOR
-const int sensorPin = 34;       //PIN USED BY THE SENSOR
-  float valueRead;              //VARIABLE THAT STORE THE PERCENTAGE OF SOIL MOISTURE
-  float analogSoilDry = 4000;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
-  float analogSoilWet = 1000;   //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
-  float percSoilDry = 0;        //LOWER PERCENTAGE OF DRY SOIL (0% - DO NOT CHANGE)
-  float percSoilWet = 100;      //HIGHER PERCENTAGE OF WET SOIL (100% - DO NOT CHANGE)
-  int   waterPumpStatus = 0;
+const int sensorPin = 34;     //PIN USED BY THE SENSOR
+float valueRead;              //VARIABLE THAT STORE THE PERCENTAGE OF SOIL MOISTURE
+float analogSoilDry = 4000;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
+float analogSoilWet = 1000;   //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
+float percSoilDry = 0;        //LOWER PERCENTAGE OF DRY SOIL (0% - DO NOT CHANGE)
+float percSoilWet = 100;      //HIGHER PERCENTAGE OF WET SOIL (100% - DO NOT CHANGE)
+int   waterPumpStatus = 0;
 #endif
 
 /* Outputs Configuration-----------------------------------------------*/
@@ -100,6 +107,7 @@ const int waterPump = 25;       // Water Pump connected to the relay on pin 25
 const int lamp = 33;           // Lamp connected to the relay on pin 33
 
 /* Main function ------------------------------------------------------------*/
+
 /*
    @brief This function is used to initial setup to the project
 */
@@ -116,7 +124,7 @@ void setup() {
 
   // Setting the I2C Serial Communication
   Wire.begin();
-  
+
 #ifdef USE_BH1750
   lightMeter.begin();
 #endif
@@ -134,8 +142,12 @@ void setup() {
 #endif
 
   // Configuring the relays control
+  // Normally Open configuration, send LOW signal to let current flow
+  // (if you're usong Normally Closed configuration send HIGH signal)
   pinMode(waterPump, OUTPUT);
   pinMode(lamp, OUTPUT);
+  digitalWrite(waterPump, LOW);
+  digitalWrite(lamp, LOW);
 
   // Init the wifi connection
   initWifi();
@@ -147,39 +159,95 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
 
-  // Normally Open configuration, send LOW signal to let current flow
-  // (if you're usong Normally Closed configuration send HIGH signal)
-  digitalWrite(waterPump, LOW);
-  digitalWrite(lamp, LOW);
+  //Getting temperature and Humidity data
+  getDhtData();
 
+  // Getting the light data and activate the lamp
+  getBh1750Data();
+
+  // Getting the Soil Humidity data and activate the pump
+  getSoilSensorData();
+
+  // Getting the Air Quality data
+  getCcs811Data();
+
+  // Print data into the Serial Port
+  printData();
+
+  // Checking if the WiFi is connected
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnecWifi();
+    //return;
+  }
+
+  // Sending data to the Thingsboard
+#ifdef USE_THINGSBOARD
+  sendDataThingsBoard();
+#endif
+
+  delay(TIME_LOOP * ONE_SECOND);
+}
+
+/* Auxiliary function ----------------------------------------------------------*/
+
+/* Sensors function ---------------------------------------------------------------*/
+/*
+   @brief Gets the Temp/Hum data
+*/
+void getDhtData(void) {
 #ifdef USE_DHT
   // Getting DHT sensor data
   dhtTemperature = dht.readTemperature();
   dhtHumidity = dht.readHumidity();
 #endif
+}
 
+/*
+   @brief Gets the light data and activate the lamp.
+*/
+void getBh1750Data() {
 #ifdef USE_BH1750
   // Getting the BH1750 sensor data
   bh1750LightMeterLux = lightMeter.readLightLevel();
 
   // Checkin if it is dark and turn on the lamp
-  if(bh1750LightMeterLux < LUX_MIN){
+  if (bh1750LightMeterLux < LUX_MIN) {
     digitalWrite(lamp, HIGH);
     lampStatus = 1;
   }
-  else{
+  else {
     digitalWrite(lamp, LOW);
     lampStatus = 0;
   }
 #endif
+}
 
+/*
+   @brief Gets the Soil Humidity data and activate the pump
+*/
+void getSoilSensorData(void) {
 #ifdef USE_SOIL_SENSOR
   // Geting the Soil Moisture sensor data
-  //valueRead = constrain(analogRead(sensorPin), analogSoilWet, analogSoilDry); //KEEP valueRead WITHIN THE RANGE (BETWEEN analogSoilWet AND analogSoilDry)
-  //valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry); //EXECUTE THE "map" FUNCTION ACCORDING TO THE PAST PARAMETERS
-  valueRead = analogRead(sensorPin);
-#endif
+  //KEEP valueRead WITHIN THE RANGE (BETWEEN analogSoilWet AND analogSoilDry)
+  //valueRead = constrain(analogRead(sensorPin), analogSoilWet, analogSoilDry);
 
+  //EXECUTE THE "map" FUNCTION ACCORDING TO THE PAST PARAMETERS
+  //valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry);
+  valueRead = analogRead(sensorPin);
+
+  // Checking if it has to turn on the water pump
+  if (valueRead >= analogSoilDry) {
+    digitalWrite(waterPump, HIGH);
+  } else if (valueRead <= percSoilWet) {
+    digitalWrite(waterPump, LOW);
+  }
+#endif
+}
+
+/*
+   @brief Getting the Air Quality data
+*/
+void getCcs811Data(void) {
 #ifdef USE_CCS811
   // Getting the CSS811 sensor data
   if (ccs811.available()) {
@@ -190,7 +258,13 @@ void loop() {
     }
   }
 #endif
+}
 
+
+/*
+   @brief Print data into the Serial Port
+*/
+void printData(void) {
 #ifdef USE_DHT
   // Print the data into the Console Serial Communication
   Serial.print("temperatura: ");
@@ -227,56 +301,52 @@ void loop() {
   Serial.print("ppb Temp:");
   Serial.println(ccs811temp);
 #endif
+}
 
-  // Checking if the WiFi is connected
-  if (WiFi.status() != WL_CONNECTED) {
-    reconnecWifi();
-    return;
-  }
+/* ThingsBoard function ---------------------------------------------------------*/
+/*
+   @brief Sending data to the Thingsboard
+*/
+void sendDataThingsBoard(void) {
 
-#ifdef USE_THINGSBOARD
-  // Checking if it is connected to the Thingsboard Server
-  if (!thingsBoard.connected()) {
-    thingsBoard.connect(THINGSBOARD_SERVER, TOKEN);
-  }
-  Serial.print("Conectando ao ThingsBoard \n");
-#endif
+  countToSend++;
 
-  // Sending Sensor data to the Thingsboard Plataform
+  if (countToSend >= TIME_THINGSBOARD) {
+
+    // Checking if it is connected to the Thingsboard Server
+    if (!thingsBoard.connected()) {
+      thingsBoard.connect(THINGSBOARD_SERVER, TOKEN);
+    }
+    Serial.print("Conectando ao ThingsBoard \n");
+
+    // Sending Sensor data to the Thingsboard Plataform
+
 #ifdef USE_DHT
-  #ifdef USE_THINGSBOARD
     thingsBoard.sendTelemetryFloat("Temperatura", dhtTemperature);
     thingsBoard.sendTelemetryFloat("Umidade", dhtHumidity);
-  #endif
 #endif
 
 #ifdef USE_BH1750
-  #ifdef USE_THINGSBOARD
     thingsBoard.sendTelemetryFloat("Luminosidade", bh1750LightMeterLux);
     thingsBoard.sendTelemetryInt  ("Lampada", lampStatus);
-  #endif
 #endif
 
 #ifdef USE_SOIL_SENSOR
-  #ifdef USE_THINGSBOARD
     thingsBoard.sendTelemetryFloat("Solo", valueRead);
     thingsBoard.sendTelemetryInt  ("Bomba", waterPumpStatus);
-  #endif
 #endif
 
 #ifdef USE_CCS811
-  #ifdef USE_THINGSBOARD
     thingsBoard.sendTelemetryFloat("CO2", ccs811CO2);
     thingsBoard.sendTelemetryFloat("TVOC", ccs811Tvoc);
-  #endif
 #endif
 
-  Serial.print("Dados Enviados! \n");
+    Serial.print("Dados Enviados! \n");
 
-  delay(5000);
+    // Clearing the counter and wait to the next loop
+    countToSend = 0;
+  }
 }
-
-/* Auxiliary function ----------------------------------------------------------*/
 
 /* WiFi function ---------------------------------------------------------------*/
 /*
