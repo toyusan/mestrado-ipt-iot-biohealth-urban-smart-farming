@@ -28,8 +28,7 @@
 
 #include <WiFiUdp.h>          // Servidor Relógio
 #include <HTTPClient.h>       // Postar o código na web
-#include <time.h>             // RTC
-#include <sys/time.h>         // RTC
+#include "time.h"             // RTC
 
 #include "ThingsBoard.h"     // The Things Board Library
 #include "DHT.h"             // Temperature and Humidity Library
@@ -48,6 +47,11 @@ unsigned long previousMillis = 0;
 unsigned long interval = 5000;
 
 WiFiClient espClient;
+
+/* NTP Configuration ---------------------------------------------------------*/
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -10800; // For UTC -3 = -3*60*60 =
+const int daylightOffset_sec = 0;
 
 /* ThingsBoard Configuration--------------------------------------------------*/
 ThingsBoard thingsBoard(espClient);
@@ -76,33 +80,20 @@ float ccs811Tvoc = 0;
 /* Soil Humidity Configuration-----------------------------------------------*/
 const int sensorPin = 34;     //PIN USED BY THE SENSOR
 float valueRead;              //VARIABLE THAT STORE THE PERCENTAGE OF SOIL MOISTURE
-float analogSoilDry = 4000;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
-float analogSoilWet = 1000;   //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
+float analogSoilDry = 1300;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
+float analogSoilWet = 0;      //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
 float percSoilDry = 0;        //LOWER PERCENTAGE OF DRY SOIL (0% - DO NOT CHANGE)
 float percSoilWet = 100;      //HIGHER PERCENTAGE OF WET SOIL (100% - DO NOT CHANGE)
+
+#define SOIL_WET    80        // Percentage to turn of the pump
+#define SOIL_DRY    20        // Percentage to turn on the pump
 int   waterPumpStatus = 0;
 
 /* Outputs Configuration-----------------------------------------------*/
 const int waterPump = 33;       // Water Pump connected to the relay on pin 25
 const int lamp = 25;            // Lamp connected to the relay on pin 33
 
-/* Interscity data-----------------------------------------------------*/
-//Cria a estrutura que contem as informacoes da data.
-struct  tm data;
-char    dado[512], hora[15];
-int     contador = 1, num_dados = 20; // Define o número de dados à enviar em cada pacote
-String  dado_build, json;
-char    data_formatada[64];
-
 /* NTP TIME ----------------------------------------------------------*/
-//IPAddress timeServer(129, 6, 15, 28);         // time.nist.gov NTP server
-unsigned int  fuso = -3;                       //informe o fuso da sua região
-unsigned int  localPort = 2390;                // local port to listen for UDP packets
-IPAddress     timeServerIP;                    // time.nist.gov NTP server address
-const char*   ntpServerName = "time.nist.gov";
-const int     NTP_PACKET_SIZE = 48;            // NTP time stamp is in the first 48 bytes of the message
-byte          packetBuffer[ NTP_PACKET_SIZE];  //buffer to hold incoming and outgoing packets
-WiFiUDP udp;
 
 /* Main function ------------------------------------------------------------*/
 
@@ -147,9 +138,8 @@ void setup() {
   // Init the wifi connection
   initWifi();
 
-  // Init NTP time
-  //udp.begin(localPort);
-  //ntp();
+  // Init and get Time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 }
 
 /*
@@ -179,18 +169,17 @@ void loop() {
     return;
   }
 
-  // Sending data to the Thingsboard
-  sendDataThingsBoard();
-
-  // Sending data to the Intescity
-  //sendDataInterscity();
+  // Sendign Data
+  sendDataToServer();
 
   delay(TIME_LOOP * ONE_SECOND);
 }
 
 /* Auxiliary function ----------------------------------------------------------*/
 
-/* Sensors function ---------------------------------------------------------------*/
+/* Time Functions --------------------------------------------------------------*/
+
+/* Sensors function ------------------------------------------------------------*/
 /*
    @brief Gets the Temp/Hum data
 */
@@ -209,11 +198,11 @@ void getBh1750Data() {
 
   // Checkin if it is dark and turn on the lamp
   if (bh1750LightMeterLux < LUX_MIN) {
-    digitalWrite(lamp, LOW);
+    //digitalWrite(lamp, LOW);
     lampStatus = 1;
   }
   else {
-    digitalWrite(lamp, HIGH);
+    //digitalWrite(lamp, HIGH);
     lampStatus = 0;
   }
 }
@@ -223,18 +212,21 @@ void getBh1750Data() {
 */
 void getSoilSensorData(void) {
   // Geting the Soil Moisture sensor data
-  //KEEP valueRead WITHIN THE RANGE (BETWEEN analogSoilWet AND analogSoilDry)
-  //valueRead = constrain(analogRead(sensorPin), analogSoilWet, analogSoilDry);
 
-  //EXECUTE THE "map" FUNCTION ACCORDING TO THE PAST PARAMETERS
-  //valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry);
+  // Soil Wet: analogRead ~= 0
+  // Soil Dry: analogRead ~=1300
   valueRead = analogRead(sensorPin);
 
+  //EXECUTE THE "map" FUNCTION ACCORDING TO THE PAST PARAMETERS
+  valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry);
+
   // Checking if it has to turn on the water pump
-  if (valueRead >= analogSoilDry) {
-    digitalWrite(waterPump, LOW);
-  } else if (valueRead <= percSoilWet) {
+  if (valueRead > SOIL_WET) {
     digitalWrite(waterPump, HIGH);
+    waterPumpStatus = 0;
+  } else if (valueRead < SOIL_DRY) {
+    digitalWrite(waterPump, LOW);
+    waterPumpStatus = 1;
   }
 }
 
@@ -257,6 +249,14 @@ void getCcs811Data(void) {
 */
 void printData(void) {
   // Print the data into the Console Serial Communication
+
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+  } else {
+    Serial.println(&timeinfo, "%d/%m/%YT%H:%M:%S");
+  }
+
   Serial.print("temperatura: ");
   Serial.print(dhtTemperature);
   Serial.print("\r\n");
@@ -286,73 +286,87 @@ void printData(void) {
   Serial.println(ccs811temp);
 }
 
-/* ThingsBoard function ---------------------------------------------------------*/
+/* Send Data To Server functions -----------------------------------------------*/
+
 /*
-   @brief Sending data to the Thingsboard
+   @brief Sending data to the Servers
 */
-void sendDataThingsBoard(void) {
-
+void sendDataToServer(void) {
   countToSend++;
-
   if (countToSend >= TIME_THINGSBOARD) {
 
-    // Checking if it is connected to the Thingsboard Server
-    if (!thingsBoard.connected()) {
-      thingsBoard.connect(THINGSBOARD_SERVER, TOKEN);
-    }
-    Serial.println("Conectando ao ThingsBoard \n");
+    // Sending data to the Thingsboard
+    sendDataThingsBoard();
 
-    // Sending Sensor data to the Thingsboard Plataform
-
-    thingsBoard.sendTelemetryFloat("Temperatura", dhtTemperature);
-    thingsBoard.sendTelemetryFloat("Umidade", dhtHumidity);
-
-    thingsBoard.sendTelemetryFloat("Luminosidade", bh1750LightMeterLux);
-    thingsBoard.sendTelemetryInt  ("Lampada", lampStatus);
-
-    thingsBoard.sendTelemetryFloat("Solo", valueRead);
-    thingsBoard.sendTelemetryInt  ("Bomba", waterPumpStatus);
-
-    thingsBoard.sendTelemetryFloat("CO2", ccs811CO2);
-    thingsBoard.sendTelemetryFloat("TVOC", ccs811Tvoc);
-
+    // Sending data to the Intescity
+    sendDataInterscity();
     Serial.println("Dados Enviados!");
-
     // Clearing the counter and wait to the next loop
     countToSend = 0;
   }
 }
 
+
 /*
-   @brief Sending data to the Interscity
+   @brief Sending data to the Thingsboard
 */
-void sendDataInterscity(void) {
-  
-  timestamp();
-  
-  sprintf(dado, "{\"temperatura_DHT22\":\"%.2f\", \"umidade_DHT22\":\"%.2f\",\"date\":\"%s\"}", dhtTemperature, dhtHumidity, data_formatada);
-  
-  json = dado;
-  
-  while (json != ""){
-    enviar_dado();
+void sendDataThingsBoard(void) {
+
+  // Checking if it is connected to the Thingsboard Server
+  if (!thingsBoard.connected()) {
+    thingsBoard.connect(THINGSBOARD_SERVER, TOKEN);
   }
+  Serial.println("Conectando ao ThingsBoard \n");
+
+  // Sending Sensor data to the Thingsboard Plataform
+
+  thingsBoard.sendTelemetryFloat("Temperatura", dhtTemperature);
+  thingsBoard.sendTelemetryFloat("Umidade", dhtHumidity);
+
+  thingsBoard.sendTelemetryFloat("Luminosidade", bh1750LightMeterLux);
+  //thingsBoard.sendTelemetryInt  ("Lampada", lampStatus);
+
+  thingsBoard.sendTelemetryFloat("Solo", valueRead);
+  thingsBoard.sendTelemetryInt  ("Bomba", waterPumpStatus);
+
+  thingsBoard.sendTelemetryFloat("CO2", ccs811CO2);
+  thingsBoard.sendTelemetryFloat("TVOC", ccs811Tvoc);
 }
 
-void enviar_dado() {
+/*
+  @brief Sending data to the Intescity
+*/
+void sendDataInterscity(void) {
+  char dataFormata[30];
+  char dado[2048];
+  String json;
+  struct tm timeinfo;
+
+  Serial.println("Conectando ao Interscity \n");
+
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  strftime(dataFormata, 30, "%d/%m/%YT%H:%M:%S", &timeinfo);
+
+  sprintf(dado, "{\"urban_smart_farm_temp\":\"%.2f\",\"urban_smart_farm_umid\":\"%.2f\",\"urban_smart_farm_lux\":\"%.2f\",\"urban_smart_farm_soil\":\"%.2f\",\"urban_smart_farm_pump\":\"%d\",\"urban_smart_farm_co2\":\"%.2f\",\"urban_smart_farm_tvoc\":\"%.2f\",\"date\":\"%s\"}", dhtTemperature, dhtHumidity, bh1750LightMeterLux, valueRead, waterPumpStatus, ccs811CO2, ccs811Tvoc, dataFormata);
+
+  json = dado;
+
   String dado_inicial = "{\"data\":{\"environment_monitoring\":[";
   String dado_final = json + "]}}";
   json = dado_inicial + dado_final;
   Serial.println(json);
 
   HTTPClient http;
-  http.begin("https://api.playground.interscity.org/adaptor/resources/ed53b76f-3ebc-4a15-b760-a5791495be3f/data");  //Specify destination for HTTP request
+  http.begin("https://api.playground.interscity.org/adaptor/resources/.../data");  //Specify destination for HTTP request
   http.addHeader("Content-Type", "application/json");             //Specify content-type header
-  
+
   int httpResponseCode = http.POST(json);
   //Send the actual POST request
 
-  if (httpResponseCode == 201){
+  if (httpResponseCode == 201) {
     Serial.print("Retorno"); Serial.print("\t");
     Serial.println(httpResponseCode);   //Print return code
   }
@@ -366,95 +380,11 @@ void enviar_dado() {
   }
 
   http.end();  //Free resources
-  
+
   json = "";
 }
 
-void ntp() { // busca  Network Time Protocol (NTP) time server
-  //get a random server from the pool
-  
-  int cb;
-  do {
-  WiFi.hostByName(ntpServerName, timeServerIP);
-  sendNTPpacket(timeServerIP); // send an NTP packet to a time server
-  delay(1000);
-  cb = udp.parsePacket();
-  Serial.println(cb);
-  // wait to see if a reply is available
-  } while(!cb);
-  
-    udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
 
-    // converte ntp em UNIX (epoch) usado como referencia
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-    secsSince1900 += fuso * 60 * 60;// corrige a hora para o fuso desejado
-    // now convert NTP time into everyday time:
-    // Unix time starts on Jan 1 1970. Segundos desde 1970 2208988800:
-    const unsigned long seventyYears = 2208988800UL;
-    unsigned long epoch = secsSince1900 - seventyYears;//  obtem valor em Unix time
-    //Serial.print("Unix time = ");//imprime os segundos desde 1970 para obter o valor época
-    //Serial.println(epoch);
-
-    timeval tv;//Cria a estrutura temporaria para funcao abaixo.
-    tv.tv_sec = epoch;//Atribui minha data atual. Voce pode usar o NTP para isso ou o site Unix Time Stamp
-    settimeofday(&tv, NULL);//Configura o RTC para manter a data atribuida atualizada.
-
-    /* imprime hora local
-      char hora[30];// concatena a impressão da hora
-      int  h, m, s;// hora, minuto, segundos
-      h = (epoch  % 86400L) / 3600; // converte unix em hora (86400 equals secs per day)
-      m = (epoch % 3600) / 60; // converte unix em minuto (3600 equals secs per minute)
-      s = (epoch % 60); // converte unix em segundo
-      sprintf( hora, "%02d:%02d:%02d", h, m, s);// concatena os valores h,m,s
-
-      Serial.print("hora local:");
-      Serial.println(hora);
-    */
-  // wait ten seconds before asking for the time again
-  //delay(10000);
-}
-
-unsigned long sendNTPpacket(IPAddress& address) {
-
-  Serial.println("sending NTP packet...");
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  udp.beginPacket(address, 123); //NTP requests are to port 123
-  udp.write(packetBuffer, NTP_PACKET_SIZE);
-  udp.endPacket();
-  //*************************************************************
-}
-
-void timestamp() {
-  //vTaskDelay(pdMS_TO_TICKS(1000));//Espera 1 seg
-
-  time_t tt = time(NULL);//Obtem o tempo atual em segundos. Utilize isso sempre que precisar obter o tempo atual
-  data = *gmtime(&tt);//Converte o tempo atual e atribui na estrutura
-  //strftime(data_formatada, 64, "%Y-%m-%d %H:%M:%S", &data);//Cria uma String formatada da estrutura "data"
-  strftime(data_formatada, 64, "%Y-%m-%dT%H:%M:%SZ", &data);//Cria uma String formatada da estrutura "data" 2021-05-06T00:01:00.000+00:00
-  //Serial.println(int32_t(tt));//Mostra na Serial o Unix time
-  //String ms = "000";
-  //sprintf(hora, "%d%s", int32_t(tt), ms);
-  //Serial.print("Data formatada: ");
-  //Serial.println(data_formatada);//Mostra na Serial a data formatada
-  //Serial.println(hora);
-}
 /* WiFi function ---------------------------------------------------------------*/
 /*
    @brief Initializes the wifi connection
