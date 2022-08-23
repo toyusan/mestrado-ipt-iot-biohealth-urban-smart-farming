@@ -16,11 +16,13 @@
 #define APP_VERSION "1.0.0"
 #define SEPARATOR_LINE "****************************************************"
 
-#define TIME_LOOP   5
+#define TIME_LOOP   1
 #define ONE_SECOND  1000
 #define ONE_MINUTE  60 * 1000
 #define ONE_HOUR    60 * ONE_MINUTE
 #define ONE_DAY     24 * ONE_HOUR
+
+#define TIME_THINGSBOARD (ONE_MINUTE / ONE_SECOND) / TIME_LOOP  // Send data every One minute ->(60*1000/1000)/1 = 60 Loops de 1 segundos
 
 /* Private includes ----------------------------------------------------------*/
 #include "Arduino.h"
@@ -40,8 +42,8 @@
 int serialDataRate = 115200;
 
 /* WiFi Configuration---------------------------------------------------------*/
-char wifiSsid[] = "...";     // This is the WiFi network name!
-char wifiPass[] = "..."; // This is the wifi password!
+char wifiSsid[] = "WIFI";     // This is the WiFi network name!
+char wifiPass[] = "PASS";     // This is the wifi password!
 
 unsigned long previousMillis = 0;
 unsigned long interval = 5000;
@@ -55,9 +57,8 @@ const int daylightOffset_sec = 0;
 
 /* ThingsBoard Configuration--------------------------------------------------*/
 ThingsBoard thingsBoard(espClient);
-#define THINGSBOARD_SERVER  "..."
-#define TOKEN               "..."
-#define TIME_THINGSBOARD    (ONE_MINUTE / ONE_SECOND) / TIME_LOOP  // Send data every One minute ->(60*1000/1000)/5 = 12 Loops de 5 segundos
+#define THINGSBOARD_SERVER  "255.255.255.255" // -> Must change to your Server
+#define TOKEN               "xxxxxxxxxxxxxxxxx" // -> Must change to your token
 int countToSend = 0;
 
 /* DHT Configuration----------------------------------------------------------*/
@@ -80,13 +81,13 @@ float ccs811Tvoc = 0;
 /* Soil Humidity Configuration-----------------------------------------------*/
 const int sensorPin = 34;     //PIN USED BY THE SENSOR
 float valueRead;              //VARIABLE THAT STORE THE PERCENTAGE OF SOIL MOISTURE
-float analogSoilDry = 1300;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
-float analogSoilWet = 0;      //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
-float percSoilDry = 0;        //LOWER PERCENTAGE OF DRY SOIL (0% - DO NOT CHANGE)
-float percSoilWet = 100;      //HIGHER PERCENTAGE OF WET SOIL (100% - DO NOT CHANGE)
+float analogSoilDry = 1320;      //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
+float analogSoilWet = 500;   //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
+float percSoilDry = 100;        //LOWER PERCENTAGE OF DRY SOIL (0% - DO NOT CHANGE)
+float percSoilWet = 0;      //HIGHER PERCENTAGE OF WET SOIL (100% - DO NOT CHANGE)
 
-#define SOIL_WET    80        // Percentage to turn of the pump
-#define SOIL_DRY    20        // Percentage to turn on the pump
+#define SOIL_WET    50        // Percentage to turn of the pump
+#define SOIL_DRY    30        // Percentage to turn on the pump
 int   waterPumpStatus = 0;
 
 /* Outputs Configuration-----------------------------------------------*/
@@ -97,6 +98,7 @@ const int lamp = 25;            // Lamp connected to the relay on pin 33
 
 /* Main function ------------------------------------------------------------*/
 
+int count = 0;
 /*
    @brief This function is used to initial setup to the project
 */
@@ -140,6 +142,8 @@ void setup() {
 
   // Init and get Time
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  //analogReference(EXTERNAL);
 }
 
 /*
@@ -185,7 +189,7 @@ void loop() {
 */
 void getDhtData(void) {
   // Getting DHT sensor data
-  dhtTemperature = dht.readTemperature();
+  dhtTemperature =  dht.readTemperature();
   dhtHumidity = dht.readHumidity();
 }
 
@@ -212,21 +216,47 @@ void getBh1750Data() {
 */
 void getSoilSensorData(void) {
   // Geting the Soil Moisture sensor data
+  float lastValue = valueRead;
+  float percentValue = 0;
+  int count = 0;
+  float soilMed = 0;
+  int maxCount = 100;
 
-  // Soil Wet: analogRead ~= 0
-  // Soil Dry: analogRead ~=1300
-  valueRead = analogRead(sensorPin);
+  for(count = 0; count < maxCount; count++){
+    //valueRead = (float(analogRead(sensorPin))/1023.0)*3.3;
+    valueRead = (float(analogRead(sensorPin)));
+    soilMed = valueRead + soilMed;
+    delay(1);
+  }
+
+  valueRead = soilMed/maxCount;
+ 
+  Serial.print("\r\n");
+  Serial.print("Umidade do solo: ");
+  Serial.print(valueRead);
+  Serial.print(" Bomba: ");
+  Serial.print(waterPumpStatus);
+  Serial.print("\r\n");
+  Serial.print("\r\n");
 
   //EXECUTE THE "map" FUNCTION ACCORDING TO THE PAST PARAMETERS
+  //valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry);
   valueRead = map(valueRead, analogSoilWet, analogSoilDry, percSoilWet, percSoilDry);
-
+  if( valueRead < 0 || valueRead > 100){
+    valueRead = lastValue;
+  }
+  valueRead = 100 - valueRead; // A leitura está invertida
+    
+  //analogSoilDry = 1200;   //VALUE MEASURED WITH DRY SOIL (YOU CAN MAKE TESTS AND ADJUST THIS VALUE)
+  //analogSoilWet = 1000;   //VALUE MEASURED WITH WET SOIL (YOU CAN DO TESTS AND ADJUST THIS VALUE)
+  
   // Checking if it has to turn on the water pump
-  if (valueRead > SOIL_WET) {
-    digitalWrite(waterPump, HIGH);
-    waterPumpStatus = 0;
-  } else if (valueRead < SOIL_DRY) {
+  if (valueRead < SOIL_DRY) {
     digitalWrite(waterPump, LOW);
     waterPumpStatus = 1;
+  } else{
+    digitalWrite(waterPump, HIGH);
+    waterPumpStatus = 0;
   }
 }
 
@@ -360,7 +390,7 @@ void sendDataInterscity(void) {
   Serial.println(json);
 
   HTTPClient http;
-  http.begin("https://api.playground.interscity.org/adaptor/resources/.../data");  //Specify destination for HTTP request
+  http.begin("https://api.playground.interscity.org/adaptor/resources/UUID/data");  //Specify destination for HTTP request
   http.addHeader("Content-Type", "application/json");             //Specify content-type header
 
   int httpResponseCode = http.POST(json);
